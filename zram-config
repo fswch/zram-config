@@ -2,8 +2,6 @@
 # shellcheck disable=SC2140,SC2210
 set -x
 
-TMPDIR="/tmp"
-
 createZdevice() {
 	if ! [[ -d "/sys/class/zram-control" ]]; then
 		modprobe --verbose zram >> "$ZLOG" 2>&1 || return 1
@@ -189,6 +187,134 @@ serviceConfiguration() {
 	fi
 }
 
+zram_config_start() {
+	echo "zram-config start $(date +%Y-%m-%d-%H:%M:%S)" >> "$ZLOG"
+	rm -fv "${TMPDIR}"/zram-device-list.new >> "$ZLOG"
+	file="/etc/ztab"
+	ZTAB_EMPTY="true"
+	while read -r line; do
+		case "$line" in
+			"#"*)
+				# Skip comment line
+				continue
+				;;
+
+			"")
+				# Skip empty line
+				continue
+				;;
+
+			*)
+				# shellcheck disable=SC2086
+				set -- $line
+				echo "ztab create ${1} ${2} ${3} ${4} ${5} ${6} ${7} ${8} ${9}" >> "$ZLOG"
+				ZTAB_EMPTY="false"
+				ZTYPE="$1"
+				ALG="$2"
+				MEM_SIZE="$3"
+				DISK_SIZE="$4"
+				if [[ -f "${TMPDIR}"/zram-device-list ]]; then
+					if [[ $1 == "swap" ]]; then
+						entry="$(grep "^swap" "${TMPDIR}"/zram-device-list)"
+					else
+						entry="$(grep "${1}.*${5}" "${TMPDIR}"/zram-device-list)"
+					fi
+					if [[ -n $entry ]]; then
+						echo "entry ${entry} already exists as zram."
+						echo "$entry" >> "${TMPDIR}"/zram-device-list.new
+						continue
+					fi
+				fi
+				test -f "${TMPDIR}"/zram-device-list.new && mv "${TMPDIR}"/zram-device-list.new "${TMPDIR}"/zram-device-list
+
+				case "$1" in
+					swap)
+						PRIORITY="$5"
+						PAGE_CLUSTER="$6"
+						SWAPPINESS="$7"
+						createZswap
+						;;
+
+					dir)
+						TARGET_DIR="$5"
+						BIND_DIR="$6"
+						serviceConfiguration "stop"
+						createZdir
+						;;
+
+					log)
+						TARGET_DIR="$5"
+						BIND_DIR="$6"
+						OLDLOG_DIR="$7"
+						serviceConfiguration "stop"
+						createZdir
+						;;
+				esac
+				;;
+		esac
+	done < "$file"
+	if [[ $ZTAB_EMPTY == "true" ]]; then
+		echo "'/etc/ztab' is empty and needs to be configured" >> "$ZLOG"
+		exit 1
+	fi
+}
+
+zram_config_stop() {
+	if [[ $(systemctl is-active zram-config.service) == "active" ]]; then
+		systemctl stop zram-config.service & systemctl kill zram-config.service >> "$ZLOG" 2>&1 || return 1
+	fi
+	echo "zram-config stop $(date +%Y-%m-%d-%H:%M:%S)" >> "$ZLOG"
+	tac "${TMPDIR}"/zram-device-list > "${TMPDIR}"/zram-device-list.rev
+	file="${TMPDIR}/zram-device-list.rev"
+	while read -r line; do
+		case "$line" in
+			"#"*)
+				# Skip comment line
+				continue
+				;;
+
+			"")
+				# Skip empty line
+				continue
+				;;
+
+			*)
+				# shellcheck disable=SC2086
+				set -- $line
+				echo "ztab remove ${1} ${2} ${3} ${4}" >> "$ZLOG"
+				case "$1" in
+					swap)
+						ZRAM_DEV="$2"
+						removeZswap
+						;;
+
+					dir)
+						ZRAM_DEV="$2"
+						TARGET_DIR="$3"
+						BIND_DIR="$4"
+						if [[ -z $SERVICE ]]; then
+							serviceConfiguration "stop"
+						fi
+						removeZdir
+						;;
+
+					log)
+						ZRAM_DEV="$2"
+						TARGET_DIR="$3"
+						BIND_DIR="$4"
+						if [[ -z $SERVICE ]]; then
+							serviceConfiguration "stop"
+						fi
+						removeZdir
+						;;
+				esac
+				;;
+		esac
+	done < "$file"
+	rm -fv "${TMPDIR}"/zram-device-list.rev "${TMPDIR}"/zram-device-list >> "$ZLOG"
+}
+
+TMPDIR="/tmp"
 ZSHARE="/usr/local/share/zram-config"
 ZLOG="${ZSHARE}/log/zram-config.log"
 ZDIR="/opt/zram"
@@ -198,132 +324,11 @@ fi
 
 case "$1" in
 	start)
-		echo "zram-config start $(date +%Y-%m-%d-%H:%M:%S)" >> "$ZLOG"
-		rm -fv "${TMPDIR}"/zram-device-list.new >> "$ZLOG"
-		file="/etc/ztab"
-		ZTAB_EMPTY="true"
-		while read -r line; do
-			case "$line" in
-				"#"*)
-					# Skip comment line
-					continue
-					;;
-
-				"")
-					# Skip empty line
-					continue
-					;;
-
-				*)
-					# shellcheck disable=SC2086
-					set -- $line
-					echo "ztab create ${1} ${2} ${3} ${4} ${5} ${6} ${7} ${8} ${9}" >> "$ZLOG"
-					ZTAB_EMPTY="false"
-					ZTYPE="$1"
-					ALG="$2"
-					MEM_SIZE="$3"
-					DISK_SIZE="$4"
-					if [[ -f "${TMPDIR}"/zram-device-list ]]; then
-						if [[ $1 == "swap" ]]; then
-							entry="$(grep "^swap" "${TMPDIR}"/zram-device-list)"
-						else
-							entry="$(grep "${1}.*${5}" "${TMPDIR}"/zram-device-list)"
-						fi
-						if [[ -n $entry ]]; then
-							echo "entry ${entry} already exists as zram."
-							echo "$entry" >> "${TMPDIR}"/zram-device-list.new
-							continue
-						fi
-					fi
-					test -f "${TMPDIR}"/zram-device-list.new && mv "${TMPDIR}"/zram-device-list.new "${TMPDIR}"/zram-device-list
-
-					case "$1" in
-						swap)
-							PRIORITY="$5"
-							PAGE_CLUSTER="$6"
-							SWAPPINESS="$7"
-							createZswap
-							;;
-
-						dir)
-							TARGET_DIR="$5"
-							BIND_DIR="$6"
-							serviceConfiguration "stop"
-							createZdir
-							;;
-
-						log)
-							TARGET_DIR="$5"
-							BIND_DIR="$6"
-							OLDLOG_DIR="$7"
-							serviceConfiguration "stop"
-							createZdir
-							;;
-					esac
-					;;
-			esac
-		done < "$file"
-		if [[ $ZTAB_EMPTY == "true" ]]; then
-			echo "'/etc/ztab' is empty and needs to be configured" >> "$ZLOG"
-			exit 1
-		fi
+		zram_config_start
 		;;
-
 	stop)
-		if [[ $(systemctl is-active zram-config.service) == "active" ]]; then
-			systemctl stop zram-config.service & systemctl kill zram-config.service >> "$ZLOG" 2>&1 || return 1
-		fi
-		echo "zram-config stop $(date +%Y-%m-%d-%H:%M:%S)" >> "$ZLOG"
-		tac "${TMPDIR}"/zram-device-list > "${TMPDIR}"/zram-device-list.rev
-		file="${TMPDIR}/zram-device-list.rev"
-		while read -r line; do
-			case "$line" in
-				"#"*)
-					# Skip comment line
-					continue
-					;;
-
-				"")
-					# Skip empty line
-					continue
-					;;
-
-				*)
-					# shellcheck disable=SC2086
-					set -- $line
-					echo "ztab remove ${1} ${2} ${3} ${4}" >> "$ZLOG"
-					case "$1" in
-						swap)
-							ZRAM_DEV="$2"
-							removeZswap
-							;;
-
-						dir)
-							ZRAM_DEV="$2"
-							TARGET_DIR="$3"
-							BIND_DIR="$4"
-							if [[ -z $SERVICE ]]; then
-								serviceConfiguration "stop"
-							fi
-							removeZdir
-							;;
-
-						log)
-							ZRAM_DEV="$2"
-							TARGET_DIR="$3"
-							BIND_DIR="$4"
-							if [[ -z $SERVICE ]]; then
-								serviceConfiguration "stop"
-							fi
-							removeZdir
-							;;
-					esac
-					;;
-			esac
-		done < "$file"
-		rm -fv "${TMPDIR}"/zram-device-list.rev "${TMPDIR}"/zram-device-list >> "$ZLOG"
+		zram_config_stop
 		;;
-
 	*)
 		echo "Usage: zram-config {start|stop}" > 2
 		exit 1
